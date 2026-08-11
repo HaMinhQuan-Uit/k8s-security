@@ -1,0 +1,63 @@
+name: K8s Policy Check
+on: [push, pull_request]
+
+jobs:
+  conftest-scan:
+    name: "Conftest Policy Scan"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install conftest
+        run: |
+          curl -sSL https://github.com/open-policy-agent/conftest/releases/download/v0.46.0/conftest_0.46.0_Linux_x86_64.tar.gz | tar xz
+          sudo mv conftest /usr/local/bin/
+
+      - name: Test bad manifests (expect failures)
+        run: |
+          echo "=== Scanning bad manifests ==="
+          conftest test manifests/bad/ --policy policy/ && echo "UNEXPECTED PASS" || echo "EXPECTED: Bad manifests correctly rejected"
+
+      - name: Test good manifests (expect pass)
+        run: |
+          echo "=== Scanning good manifests ==="
+          conftest test manifests/good/ --policy policy/
+
+  gatekeeper-integration:
+    name: "Gatekeeper Integration Test"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Create kind cluster
+        uses: helm/kind-action@v1
+        with:
+          cluster_name: test-cluster
+
+      - name: Install Gatekeeper
+        run: |
+          kubectl apply -f https://raw.githubusercontent.com/open-policy-agent/gatekeeper/v3.17.1/deploy/gatekeeper.yaml
+          echo "Waiting for Gatekeeper to be ready..."
+          kubectl wait --for=condition=Ready pods --all -n gatekeeper-system --timeout=120s
+
+      - name: Apply policies
+        run: |
+          kubectl apply -f policies/templates/
+          sleep 10
+          kubectl apply -f policies/constraints/
+          sleep 5
+
+      - name: Test bad pod is rejected
+        run: |
+          if kubectl apply -f manifests/bad/privileged-pod.yaml 2>&1; then
+            echo "FAIL: Bad pod was accepted!"
+            exit 1
+          else
+            echo "PASS: Bad pod correctly rejected"
+          fi
+
+      - name: Test good pod is accepted
+        run: |
+          kubectl apply -f manifests/good/safe-pod.yaml
+          echo "PASS: Good pod correctly accepted"
+          kubectl get pods
