@@ -1,52 +1,92 @@
-# Conftest
+# K8s Security Gate — OPA Gatekeeper Policy Enforcement
 
-[![Go Report Card](https://goreportcard.com/badge/open-policy-agent/opa)](https://goreportcard.com/report/open-policy-agent/conftest) [![Netlify](https://api.netlify.com/api/v1/badges/2d928746-3380-4123-b0eb-1fd74ba390db/deploy-status)](https://app.netlify.com/sites/vibrant-villani-65041c/deploys)
+Security gate cho Kubernetes deployment sử dụng OPA Gatekeeper
+để chặn manifest không an toàn trước khi deploy lên cluster.
 
-Conftest helps you write tests against structured configuration data. Using Conftest you can
-write tests for your Kubernetes configuration, Tekton pipeline definitions, Terraform code,
-Serverless configs or any other config files.
+## Architecture
 
-Conftest uses the Rego language from [Open Policy Agent](https://www.openpolicyagent.org/) for writing
-the assertions. You can read more about Rego in [How do I write policies](https://www.openpolicyagent.org/docs/how-do-i-write-policies.html)
-in the Open Policy Agent documentation.
+## Policies (6 rules)
 
-Here's a quick example. Save the following as `policy/deployment.rego`:
+| Policy | Threat | Description |
+|--------|--------|-------------|
+| no-privileged | T1 - Pod escape | Block containers với privileged: true |
+| no-hostpath | T2 - Data leakage | Block hostPath volume mounts |
+| no-hostnetwork | T3 - Lateral movement | Block hostNetwork/hostPID/hostIPC |
+| require-resources | T4 - DoS | Require CPU/memory requests + limits |
+| no-latest-tag | T5 - Supply chain | Block :latest image tag |
+| require-nonroot | T1 - Privilege escalation | Require runAsNonRoot: true |
 
-```rego
-package main
+## Quick Start
 
-deny[msg] {
-  input.kind == "Deployment"
-  not input.spec.template.spec.securityContext.runAsNonRoot
+### Prerequisites
+- Docker
+- kubectl
+- kind
+- Helm
 
-  msg := "Containers must not run as root"
-}
+### Setup cluster + policies
 
-deny[msg] {
-  input.kind == "Deployment"
-  not input.spec.selector.matchLabels.app
+```bash
+# Create cluster
+kind create cluster --name security-gate
 
-  msg := "Containers must provide app label for pod selectors"
-}
+# Install Gatekeeper
+kubectl apply -f https://raw.githubusercontent.com/open-policy-agent/gatekeeper/v3.17.1/deploy/gatekeeper.yaml
+kubectl wait --for=condition=Ready pods --all -n gatekeeper-system --timeout=120s
+
+# Apply policies
+kubectl apply -f policies/templates/
+sleep 10
+kubectl apply -f policies/constraints/
 ```
 
-Assuming you have a Kubernetes deployment in `deployment.yaml` you can run Conftest like so:
+### Test
 
-```console
-$ conftest test deployment.yaml
-FAIL - deployment.yaml - Containers must not run as root
-FAIL - deployment.yaml - Containers must provide app label for pod selectors
+```bash
+# Bad pod — should be DENIED
+kubectl apply -f manifests/bad/privileged-pod.yaml
+# Error: Privileged container not allowed
 
-2 tests, 0 passed, 0 warnings, 2 failures, 0 exceptions
+# Good pod — should be ACCEPTED
+kubectl apply -f manifests/good/safe-pod.yaml
+# pod/good-pod created
 ```
 
-Conftest isn't specific to Kubernetes. It will happily let you write tests for any configuration files in a variety of different formats. See the [documentation](https://www.conftest.dev/) for [installation instructions](https://www.conftest.dev/install/) and
-more details about the features.
+### CI (conftest)
 
-## Want to contribute to Conftest?
+```bash
+conftest test manifests/bad/ --policy policy/
+# 14 failures
 
-* See [DEVELOPMENT.md](DEVELOPMENT.md) to build and test Conftest itself.
-* See [CONTRIBUTING.md](CONTRIBUTING.md) to get started.
+conftest test manifests/good/ --policy policy/
+# 12 passed, 0 failures
+```
 
-For discussions and questions join us on the [Open Policy Agent Slack](https://slack.openpolicyagent.org/)
-in the `#opa-conftest` channel.
+## Monitoring
+
+Prometheus + Grafana dashboard tracking:
+- `gatekeeper_constraint_templates` — active policies count
+- Policy evaluation metrics
+
+## Project Structure
+
+## Test Results
+
+| Test | Manifest | Expected | Result |
+|------|----------|----------|--------|
+| TC1 | privileged-pod.yaml | Denied (7 violations) | ❌ Denied |
+| TC2 | hostpath-pod.yaml | Denied (6 violations) | ❌ Denied |
+| TC3 | latest-tag-pod.yaml | Denied (1 violation) | ❌ Denied |
+| TC4 | safe-pod.yaml | Accepted | ✅ Created |
+
+## Lessons Learned
+
+- Gatekeeper chặn luôn Prometheus/Grafana vì thiếu resource limits
+  → Giải pháp: exclude namespace `monitoring`
+- Policy cần test kỹ trước khi apply — có thể block infrastructure tools
+- Conftest trong CI cho feedback sớm hơn Gatekeeper (shift-left)
+
+## Author
+
+Ha Minh Quan — UIT-VNUHCM
+Information Security — 4th Year

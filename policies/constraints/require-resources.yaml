@@ -10,3 +10,4 @@ spec:
     excludedNamespaces:
       - kube-system
       - gatekeeper-system
+      - monitoring
